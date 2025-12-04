@@ -1,6 +1,7 @@
 import cv2
 import numpy as np
 import os
+import shutil
 from joblib import dump, load
 
 from hog_utils import create_hog, compute_hog  # your existing HOG utils
@@ -10,7 +11,7 @@ from hog_utils import create_hog, compute_hog  # your existing HOG utils
 # -----------------------------
 # "mouse"    -> Left-click / Right-click to label
 # "keyboard" -> Use 'l' and 'r' keys to label at center crosshair
-INPUT_MODE = "mouse"  # change to "keyboard" if you want l/r keys
+INPUT_MODE = "keyboard"  # change to "mouse" if you want mouse clicks
 
 
 # -----------------------------
@@ -23,6 +24,7 @@ CELL_SIZE    = (8, 8)
 NBINS        = 9
 
 OUTPUT_DATASET_PATH = "data/hog_finger_click_dataset.joblib"
+BACKUP_DATASET_PATH = "data/hog_finger_click_dataset_old.joblib"
 
 # -----------------------------
 # GLOBALS FOR MOUSE CALLBACK
@@ -123,6 +125,19 @@ def maybe_load_existing_dataset():
         print("[INFO] Starting fresh dataset (existing file will be overwritten on save).")
 
 
+def backup_existing_dataset():
+    """
+    If OUTPUT_DATASET_PATH exists, copy it to BACKUP_DATASET_PATH.
+    This gives us a single backup from the last save.
+    """
+    if os.path.exists(OUTPUT_DATASET_PATH):
+        try:
+            shutil.copyfile(OUTPUT_DATASET_PATH, BACKUP_DATASET_PATH)
+            print(f"[BACKUP] Existing dataset backed up to {BACKUP_DATASET_PATH}")
+        except Exception as e:
+            print(f"[WARN] Could not backup existing dataset: {e}")
+
+
 def main():
     global last_frame, X, y
 
@@ -185,6 +200,9 @@ def main():
             if len(X) == 0:
                 print("[WARN] No samples collected; skipping save.")
             else:
+                # Always backup existing dataset (if any) before overwriting
+                backup_existing_dataset()
+
                 X_arr = np.vstack(X)   # shape (N, D)
                 y_arr = np.array(y)
                 dump((X_arr, y_arr), OUTPUT_DATASET_PATH)
