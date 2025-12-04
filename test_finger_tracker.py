@@ -19,7 +19,10 @@ SVM_MODEL_PATH  = "models/hog_finger_svm.joblib"
 
 SLIDE_STEP      = 32      # pixels between windows on the small frame
 DETECT_SCALE    = 0.5     # run HOG on downscaled frame for speed
-SCORE_THRESHOLD = 0.0     # minimum SVM score to accept detection
+
+# SVM decision-function threshold.
+# Positive classes typically have score > 0; bump this up to avoid low-confidence locks.
+SCORE_THRESHOLD = 0.3
 
 DETECT_EVERY_N  = 3       # do full HOG detection every N frames
 
@@ -29,11 +32,19 @@ EXCLUDE_X2_FRAC = 0.70    # right edge of middle band (70% of width)
 EXCLUDE_Y1_FRAC = 0.0
 EXCLUDE_Y2_FRAC = 1.0
 
-# Paddle config (vertical paddle at left or right)
+# Paddle config
 PADDLE_WIDTH    = 20
 PADDLE_HEIGHT   = 120
 PADDLE_X_OFFSET = 40      # distance from each side wall
-PADDLE_ALPHA    = 0.4     # smoothing factor for paddle movement (Y)
+PADDLE_ALPHA    = 0.4     # smoothing factor for player paddle movement
+
+# AI paddle config
+AI_PADDLE_ALPHA = 0.2     # smoothing factor for AI paddle following ball
+
+# Ball config
+BALL_RADIUS     = 12
+BALL_SPEED_X    = 350.0   # px/sec (horizontal)
+BALL_SPEED_Y    = 250.0   # px/sec (vertical)
 
 
 # ---------------------------------------------------------
@@ -43,9 +54,11 @@ PADDLE_ALPHA    = 0.4     # smoothing factor for paddle movement (Y)
 def detect_finger_hog(frame, hog, clf):
     """
     Run sliding-window HOG + SVM on a downscaled frame.
-    Ignore windows whose center is inside the central vertical band
-    (where your face is likely to be). Only use left/right side regions.
+    - Only uses the RIGHT HALF of the frame.
+    - Skips windows whose center lies in the central vertical exclusion band
+      (EXCLUDE_*_FRAC).
     Returns (x, y, w, h), best_score in original-frame coordinates.
+    If no good match (score < SCORE_THRESHOLD), returns (None, best_score).
     """
     small = cv2.resize(frame, None, fx=DETECT_SCALE, fy=DETECT_SCALE)
     Hs, Ws = small.shape[:2]
@@ -55,6 +68,10 @@ def detect_finger_hog(frame, hog, clf):
 
     win_w, win_h = hog.winSize
 
+    # Right half in small-frame coordinates
+    right_half_x_min = Ws // 2
+
+    # Exclusion band (in small-frame coords)
     ex_x1 = int(EXCLUDE_X1_FRAC * Ws)
     ex_x2 = int(EXCLUDE_X2_FRAC * Ws)
     ex_y1 = int(EXCLUDE_Y1_FRAC * Hs)
@@ -64,7 +81,11 @@ def detect_finger_hog(frame, hog, clf):
         cx = x + win_w // 2
         cy = y + win_h // 2
 
-        # Skip if center in exclusion zone (middle band)
+        # 1) Only use right half
+        if cx < right_half_x_min:
+            continue
+
+        # 2) Skip if center in middle exclusion band
         if ex_x1 <= cx <= ex_x2 and ex_y1 <= cy <= ex_y2:
             continue
 
@@ -75,6 +96,7 @@ def detect_finger_hog(frame, hog, clf):
             best_score = score
             best_box_small = (x, y, win_w, win_h)
 
+    # If no window or too low score, treat as "no detection"
     if best_box_small is None or best_score < SCORE_THRESHOLD:
         return None, best_score
 
@@ -164,7 +186,7 @@ def find_fingertip_in_box(frame, hand_box):
 
 
 # ---------------------------------------------------------
-# MAIN TEST LOOP (with vertical side paddle)
+# MAIN TEST LOOP (Pong-style)
 # ---------------------------------------------------------
 
 def main():
@@ -184,14 +206,19 @@ def main():
     ema_tip = None
     alpha = 0.3  # fingertip smoothing
 
-    # Paddle state (center y + which side)
-    paddle_cy = None
-    paddle_side = None   # "left" or "right"
-
     frame_idx = 0
     hand_box = None
+    best_score = -np.inf
 
     t_prev = time.time()
+
+    # Game objects - initialized after first frame (once we know H, W)
+    game_initialized = False
+    player_paddle_cy = None  # right paddle (finger controlled)
+    ai_paddle_cy = None      # left paddle (computer controlled)
+
+    ball_x = ball_y = None
+    ball_vx = ball_vy = None
 
     while True:
         ret, frame = cap.read()
@@ -204,13 +231,27 @@ def main():
 
         H, W = frame.shape[:2]
 
+        # Initialize game positions once we know frame size
+        if not game_initialized:
+            player_paddle_cy = H // 2
+            ai_paddle_cy = H // 2
+
+            ball_x = W // 2
+            ball_y = H // 2
+            ball_vx = BALL_SPEED_X  # start moving to the right
+            ball_vy = BALL_SPEED_Y  # downward
+
+            game_initialized = True
+
         # FPS estimation
         t_now = time.time()
         dt_frame = t_now - t_prev
         fps = 1.0 / dt_frame if dt_frame > 0 else 0.0
         t_prev = t_now
 
-        # Draw middle exclusion band (for visualization)
+        # -------------------------
+        # Visualize exclusion band (in full-res coords)
+        # -------------------------
         ex_x1_small = EXCLUDE_X1_FRAC * (W * DETECT_SCALE)
         ex_x2_small = EXCLUDE_X2_FRAC * (W * DETECT_SCALE)
         ex_y1_small = EXCLUDE_Y1_FRAC * (H * DETECT_SCALE)
@@ -228,17 +269,27 @@ def main():
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6,
                     (0, 255, 255), 2)
 
-        # Re-detect every N frames, or if we lost it
+        # -------------------------
+        # HOG finger detection (right half only, excluding middle band)
+        # -------------------------
         if frame_idx % DETECT_EVERY_N == 0 or hand_box is None:
             hand_box, best_score = detect_finger_hog(display, hog, clf)
 
         fingertip, centroid = None, None
+
+        # Only try fingertip if we actually have a good HOG box
         if hand_box is not None:
+            fingertip, centroid = find_fingertip_in_box(display, hand_box)
+
+            # If fingertip failed, treat this as "no detection"
+            if fingertip is None:
+                hand_box = None
+
+        # Draw box *only* if fingertip also exists (so we don't "lock" on junk)
+        if hand_box is not None and fingertip is not None:
             x, y, w, h = hand_box
             cv2.rectangle(display, (x, y), (x + w, y + h),
                           (0, 255, 0), 2)
-
-            fingertip, centroid = find_fingertip_in_box(display, hand_box)
 
         vx, vy = 0.0, 0.0
         if fingertip is not None:
@@ -268,66 +319,134 @@ def main():
             prev_time = t_now
 
             # -------------------------
-            # Paddle control logic
+            # Right paddle (player) vertical control
             # -------------------------
-            tip_x = ema_tip[0]
             tip_y = ema_tip[1]
-
-            # Decide side: if tip is left of middle band -> left, right of band -> right
-            if tip_x < ex_x1:
-                paddle_side = "left"
-            elif tip_x > ex_x2:
-                paddle_side = "right"
-            # if tip is inside the middle band, keep previous side
-
-            target_cy = tip_y  # vertical control
-
-            if paddle_cy is None:
-                paddle_cy = target_cy
+            if player_paddle_cy is None:
+                player_paddle_cy = tip_y
             else:
-                # Smooth paddle vertical movement
-                paddle_cy = PADDLE_ALPHA * target_cy + \
-                            (1 - PADDLE_ALPHA) * paddle_cy
+                player_paddle_cy = PADDLE_ALPHA * tip_y + \
+                                   (1 - PADDLE_ALPHA) * player_paddle_cy
 
         else:
+            # No fingertip: clear smoothing state and don't update paddle
             ema_tip = None
             prev_tip = None
             prev_time = None
-            # Keep last paddle_cy/side so it doesn't disappear
+            # player_paddle_cy stays where it was; you can also drift it to center if you prefer
 
-        # Draw paddle (vertical, on left or right side)
-        if paddle_side is not None and paddle_cy is not None:
-            half_h = PADDLE_HEIGHT // 2
-            cy_clamped = int(max(half_h, min(H - half_h, paddle_cy)))
+        # Clamp paddles to frame bounds
+        half_h = PADDLE_HEIGHT // 2
 
-            if paddle_side == "left":
-                x1 = PADDLE_X_OFFSET
-                x2 = x1 + PADDLE_WIDTH
-            else:  # "right"
-                x2 = W - PADDLE_X_OFFSET
-                x1 = x2 - PADDLE_WIDTH
+        if player_paddle_cy is None:
+            player_paddle_cy = H // 2
+        player_paddle_cy = max(half_h, min(H - half_h, player_paddle_cy))
 
-            y1 = cy_clamped - half_h
-            y2 = cy_clamped + half_h
+        if ai_paddle_cy is None:
+            ai_paddle_cy = H // 2
+        ai_paddle_cy = max(half_h, min(H - half_h, ai_paddle_cy))
 
-            cv2.rectangle(display, (x1, y1), (x2, y2),
-                          (255, 0, 0), -1)
-            cv2.putText(display, f"Paddle ({paddle_side})",
-                        (x1, max(y1 - 5, 10)),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5,
-                        (255, 0, 0), 1)
+        # -------------------------
+        # Ball movement
+        # -------------------------
+        if dt_frame > 0:
+            ball_x += ball_vx * dt_frame
+            ball_y += ball_vy * dt_frame
 
-        # HUD text
+        # Top/bottom wall collision
+        if ball_y - BALL_RADIUS < 0:
+            ball_y = BALL_RADIUS
+            ball_vy *= -1
+        elif ball_y + BALL_RADIUS > H:
+            ball_y = H - BALL_RADIUS
+            ball_vy *= -1
+
+        # -------------------------
+        # Paddle positions (rectangles)
+        # -------------------------
+        # Left (AI) paddle
+        lp_x1 = PADDLE_X_OFFSET
+        lp_x2 = lp_x1 + PADDLE_WIDTH
+        lp_y1 = int(ai_paddle_cy - half_h)
+        lp_y2 = int(ai_paddle_cy + half_h)
+
+        # Right (player) paddle
+        rp_x2 = W - PADDLE_X_OFFSET
+        rp_x1 = rp_x2 - PADDLE_WIDTH
+        rp_y1 = int(player_paddle_cy - half_h)
+        rp_y2 = int(player_paddle_cy + half_h)
+
+        # -------------------------
+        # AI paddle movement (follow ball)
+        # -------------------------
+        ai_target_cy = ball_y
+        ai_paddle_cy = (1 - AI_PADDLE_ALPHA) * ai_paddle_cy + \
+                       AI_PADDLE_ALPHA * ai_target_cy
+        ai_paddle_cy = max(half_h, min(H - half_h, ai_paddle_cy))
+        lp_y1 = int(ai_paddle_cy - half_h)
+        lp_y2 = int(ai_paddle_cy + half_h)
+
+        # -------------------------
+        # Ball-paddle collisions
+        # -------------------------
+
+        # Collision with right (player) paddle
+        if (ball_x + BALL_RADIUS >= rp_x1 and
+            ball_x - BALL_RADIUS <= rp_x2 and
+            rp_y1 <= ball_y <= rp_y2 and
+            ball_vx > 0):
+            ball_x = rp_x1 - BALL_RADIUS
+            ball_vx *= -1
+
+        # Collision with left (AI) paddle
+        if (ball_x - BALL_RADIUS <= lp_x2 and
+            ball_x + BALL_RADIUS >= lp_x1 and
+            lp_y1 <= ball_y <= lp_y2 and
+            ball_vx < 0):
+            ball_x = lp_x2 + BALL_RADIUS
+            ball_vx *= -1
+
+        # If ball goes off-screen horizontally, reset to center and reverse direction
+        if ball_x < -BALL_RADIUS or ball_x > W + BALL_RADIUS:
+            ball_x = W // 2
+            ball_y = H // 2
+            ball_vx *= -1  # send it back the other way
+
+        # -------------------------
+        # Draw paddles & ball
+        # -------------------------
+        # Left AI paddle
+        cv2.rectangle(display, (lp_x1, lp_y1), (lp_x2, lp_y2),
+                      (255, 0, 0), -1)
+        cv2.putText(display, "AI",
+                    (lp_x1, max(lp_y1 - 5, 15)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6,
+                    (255, 0, 0), 2)
+
+        # Right player paddle
+        cv2.rectangle(display, (rp_x1, rp_y1), (rp_x2, rp_y2),
+                      (0, 255, 0), -1)
+        cv2.putText(display, "YOU",
+                    (rp_x1 - 10, max(rp_y1 - 5, 15)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6,
+                    (0, 255, 0), 2)
+
+        # Ball
+        cv2.circle(display, (int(ball_x), int(ball_y)),
+                   BALL_RADIUS, (0, 255, 255), -1)
+
+        # HUD
         cv2.putText(display, f"FPS: {fps:.1f}",
                     (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.7,
                     (0, 255, 0), 2)
+        cv2.putText(display, "Right side = finger control | Left side = AI",
+                    (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
+                    (0, 255, 255), 2)
+        cv2.putText(display, f"SVM score: {best_score:.2f}",
+                    (10, 75), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
+                    (0, 255, 255), 2)
 
-        if fingertip is not None:
-            cv2.putText(display, f"vy: {vy:.1f}",
-                        (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.7,
-                        (0, 255, 0), 2)
-
-        cv2.imshow("Finger + Vertical Paddle (test)", display)
+        cv2.imshow("Finger Pong (right side player)", display)
 
         key = cv2.waitKey(1) & 0xFF
         if key == ord('q'):
