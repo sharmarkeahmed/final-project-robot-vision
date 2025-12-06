@@ -1,18 +1,28 @@
 """
 hog_finger_data.py
 
-This file is used to obtain manual finger/hand samples for HoG. Using the user's camera,
-a user will be prompted to click on positive samples (finger) and negative samples of the background.
-The file will compute a HoG for each sample and store HoG features in X array and store corresponding
-labels (positive or negative sample) in Y array. This is then stored in data/hog_finger_click_dataset.joblib
-folder. You may need to ensure a data/ folder is created before running this folder
+Used to collect manual finger/hand samples for HOG based-detection via a user's camera
 
-To obtain the X, Y array in another Python file, perform the following:
+This script lets the user label:
+    - positive samples: where a finger/hand is present
+    - negative samples: background/regions where no finger is present
 
-1.) Import joblib: 'from joblib import dump, load'
-2.) Run the following code: 'X, Y = load(data/hog_finger_click_dataset.joblib)' to obtain X, Y arrays
+For each sample taken, a HOG descriptor is computed on a fixed-size patches (64x64 pixels) and stored as a feature
+vector. After all samples are taken, the features and labels are saved to 'data/hog_finger_click_dataset.joblib' as a
+tuple (features, labels), where:
+    - features is a NumPy array of shape (N, D) containing HOG features
+    - labels is a NumPy array of shape (N,) containing labels (1 for positive, 0 for negative)
 
-Note that this file is meant to be used with the train_finger_svm.py file.
+Note that if an existing 'data/hog_finger_click_dataset.joblib' file already exists, the user will be asked if they want
+to load and append new samples to it, or override it. In either case, a backup copy of the old file is saved in
+data/hog_finger_click_dataset_old.joblib'
+
+To load this dataset in another Python file, perform the following:
+    from joblib import load
+    features, labels = load("data/hog_finger_click_dataset.joblib")
+
+This file is intended to be used together with 'train_finger_svm.py', which trains a linear SVM classifier on the
+sampled HoG features.
 """
 
 import cv2
@@ -29,7 +39,7 @@ from hog_utils import create_hog, compute_hog
 INPUT_MODE = "keyboard"
 
 # HOG configuration parameters
-HOG_WIN_SIZE = (64, 64)  # must match detection HOG
+HOG_WIN_SIZE = (64, 64)  # fixed patch size taken
 BLOCK_SIZE = (16, 16)
 BLOCK_STRIDE = (8, 8)
 CELL_SIZE = (8, 8)
