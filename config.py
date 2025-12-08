@@ -1,4 +1,8 @@
-# config.py
+"""
+config.py
+
+Contains constants for game.py, detector.py, and main.py
+"""
 
 # ---------------------------------------------------------
 # MODES
