@@ -22,10 +22,11 @@ class PongGame:
     - Scoring (player vs AI)
     - Collisions and AI behavior
 
-    The AI is intentionally "human-like":
+    The AI is intended to be "human-like":
     - Limited vertical speed (cannot instantly follow the ball)
-    - Reacts more strongly only when the ball is close and moving toward it
-    - Has deliberate mistakes / hesitation so it is beatable
+    - Reacts more strongly when the ball is close and moving toward it
+    - Is particularly vulnerable to quick vertical direction changes (jukes)
+    - Occasional small mistakes so it is still beatable
     """
 
     def __init__(self):
@@ -43,13 +44,20 @@ class PongGame:
         self.ai_score = 0
 
         # AI behavior parameters (tune these to make AI easier/harder)
-        self.ai_max_speed = 300.0      # px/sec vertical max speed (slower = easier)
-        self.ai_react_x_frac = 0.5     # AI only fully reacts when ball_x < W * this
+        self.ai_max_speed = 320.0      # px/sec vertical max speed
+        self.ai_react_x_frac = 0.55    # AI fully reacts when ball_x < W * this
         self.ai_error = 0.0            # vertical offset error (pixels)
         self.ai_error_alpha = 0.95     # smoothing factor for AI error (EMA)
 
         # "Dumbness": chance that when ball is threatening, AI reacts poorly
-        self.ai_dumb_chance = 0.35     # 0.0 = perfect robot, 1.0 = clown
+        self.ai_dumb_chance = 0.2      # 0.0 = perfect robot, 1.0 = clown
+
+        # Juke / reaction delay logic
+        self.time = 0.0
+        self.prev_ball_y = None
+        self.prev_vy_sign = 0          # sign of previous vertical velocity
+        self.last_dir_change_time = 0.0
+        self.reaction_delay = 0.18     # seconds after vy flip where AI is slow to adapt
 
     def _init_if_needed(self, H, W):
         if self.initialized:
@@ -76,6 +84,10 @@ class PongGame:
         """
         self._init_if_needed(H, W)
         half_h = PADDLE_HEIGHT // 2
+
+        # Advance internal time
+        if dt > 0:
+            self.time += dt
 
         # -------------------------
         # Player paddle follows fingertip (if present)
@@ -110,13 +122,36 @@ class PongGame:
             self.ball_vy *= -1
 
         # -------------------------
-        # AI target logic (nerfed / human-like)
+        # Track ball vertical direction & juke detection
+        # -------------------------
+        recent_flip = False
+        if self.prev_ball_y is not None and dt > 0:
+            vy_est = (self.ball_y - self.prev_ball_y) / dt
+            # Ignore tiny motion
+            if abs(vy_est) < 20:
+                vy_sign = 0
+            else:
+                vy_sign = int(np.sign(vy_est))
+
+            if vy_sign != 0 and vy_sign != self.prev_vy_sign:
+                # Vertical direction just flipped → possible juke
+                self.prev_vy_sign = vy_sign
+                self.last_dir_change_time = self.time
+
+        # Check if we're still within the reaction delay window
+        if (self.time - self.last_dir_change_time) < self.reaction_delay:
+            recent_flip = True
+
+        self.prev_ball_y = self.ball_y
+
+        # -------------------------
+        # AI target logic (juke-able)
         # -------------------------
         # Base target is the ball y
         ai_target_cy = self.ball_y
 
         # Small random vertical bias so AI doesn't line up perfectly
-        jitter = np.random.uniform(-5.0, 5.0)
+        jitter = np.random.uniform(-6.0, 6.0)
         self.ai_error = (
             self.ai_error_alpha * self.ai_error
             + (1.0 - self.ai_error_alpha) * jitter * 3.0
@@ -127,19 +162,28 @@ class PongGame:
         if ball_moving_toward_ai:
             # Ball moving left (toward AI)
             if self.ball_x < W * self.ai_react_x_frac:
-                # Ball is close enough to be dangerous → AI tries harder,
-                # but sometimes "derps" and reacts badly.
-                if np.random.rand() < self.ai_dumb_chance:
-                    # Bad reaction: aim slightly *away* from the true position
-                    ai_target_cy = self.ball_y + self.ai_error + np.random.uniform(-80, 80)
+                # Ball is close enough to be dangerous
+
+                if recent_flip:
+                    # Recently juked: AI is slow / confused → under-react.
+                    # Move only partway toward the ball, mixing with current position.
+                    ai_target_cy = (
+                        0.6 * self.ai_paddle_cy
+                        + 0.4 * (self.ball_y + self.ai_error)
+                    )
                 else:
-                    # Normal reaction with some error
-                    ai_target_cy = self.ball_y + self.ai_error
+                    # No recent juke → normal tracking with small chance of bad aim
+                    if np.random.rand() < self.ai_dumb_chance:
+                        # Slightly bad reaction: overshoot/undershoot a bit
+                        miss = np.random.uniform(-200, 200)
+                        ai_target_cy = self.ball_y + self.ai_error + miss
+                    else:
+                        ai_target_cy = self.ball_y + self.ai_error
             else:
-                # Ball still far: be lazy, drift partway between center and ball
+                # Ball still far: be lazier, drift between center and ball
                 ai_target_cy = 0.5 * (self.ball_y + H / 2) + 0.5 * self.ai_error
         else:
-            # Ball moving away from AI: relax strongly toward center
+            # Ball moving away from AI: relax toward center
             ai_target_cy = H / 2 + 0.7 * self.ai_error
 
         # -------------------------
