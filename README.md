@@ -10,5 +10,5 @@ To play the ping pong game, run main.py on your computer
 There are two training models used in this project. One involved manual hand/finger inputs, and another used an 11k hands dataset from the internet. In order to change the training model used when playing the ping pong game, enter the config.py
 file and modify the SVM model path as follows:
 
-Manual hand/finger input model: SVM_MODEL_PATH = "models/hog_finger_svm.joblib"  
-11K Hands Dataset Model: SVM_MODEL_PATH = "models/hog_11k_svm.joblib"
+**Manual hand/finger input model:** SVM_MODEL_PATH = "models/hog_finger_svm.joblib"  
+**11K Hands Dataset Model:** SVM_MODEL_PATH = "models/hog_11k_svm.joblib"
