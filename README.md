@@ -3,6 +3,8 @@ This game allows a player to play a single player ping pong game controlled with
 This game uses historgram of oriented gradients (HOG) along with SVM to perform finger detection.
 Two models can be used: either the manual hand/finger input model or the 11k hands dataset model. Refer to changing models section below on how to change the model to use.
 
+- [Project presentation](docs/project_overview.pdf)
+
 ## Usage:
 To play the ping pong game, run main.py on your computer
 
